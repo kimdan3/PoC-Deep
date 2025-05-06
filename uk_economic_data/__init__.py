@@ -6,7 +6,6 @@ import logging
 from datetime import datetime, timedelta
 import asyncio
 from .api.ons_client import ONSClient
-from .services.retail_analysis import RetailAnalysisService
 from .models.retail_sales import RetailSalesResponse
 import httpx
 import os
@@ -52,7 +51,6 @@ class UKEconomicDataFetcher:
         }
         self.client = httpx.AsyncClient(timeout=30.0)
         self.ons_client = ONSClient()
-        self.retail_analysis = RetailAnalysisService()
         self._cache: Dict[str, dict] = {}
         self._cache_file = Path("uk_economic_data_cache.json")
         self._load_cache()
@@ -169,83 +167,16 @@ class UKEconomicDataFetcher:
             logger.error(f"Error fetching retail sales data: {str(e)}")
             return {"error": str(e)}
 
-    async def fetch_weather_data(self, date: str) -> dict:
-        """Fetch weather data for the given date with caching."""
-        cache_key = f"weather_{date}"
-        if cache_key in self._cache:
-            logger.info(f"Using cached weather data for {date}")
-            return self._cache[cache_key]
-
-        try:
-            api_key = os.getenv("WEATHER_API_KEY")
-            if not api_key:
-                raise ValueError("Weather API key not configured")
-            
-            # 실제 날씨 API 호출 로직 구현
-            # 임시 데이터
-            data = {"temperature": 15, "condition": "sunny"}
-            
-            self._cache[cache_key] = data
-            self._save_cache()
-            
-            return data
-        except Exception as e:
-            logger.error(f"Error fetching weather data: {str(e)}")
-            return {"error": str(e)}
-
-    async def fetch_transport_issues(self) -> dict:
-        """Fetch current transport issues from TfL API with caching."""
-        cache_key = "transport_current"
-        cache_timeout = 300  # 5분
-
-        if cache_key in self._cache:
-            cached_data = self._cache[cache_key]
-            if datetime.now().timestamp() - cached_data.get("timestamp", 0) < cache_timeout:
-                logger.info("Using cached transport data")
-                return cached_data["data"]
-
-        try:
-            url = "https://api.tfl.gov.uk/Line/mode/tube/status"
-            response = await self.client.get(url, headers=self.headers)
-            response.raise_for_status()
-            data = response.json()
-            
-            self._cache[cache_key] = {
-                "data": data,
-                "timestamp": datetime.now().timestamp()
-            }
-            self._save_cache()
-            
-            return data
-        except Exception as e:
-            logger.error(f"Error fetching transport issues: {str(e)}")
-            return {"error": str(e)}
-
     async def get_background_info(self, date: str) -> str:
         """Get comprehensive background information for the given date."""
         try:
-            tasks = [
-                self.fetch_retail_sales(date),
-                self.fetch_weather_data(date),
-                self.fetch_transport_issues()
-            ]
-            
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-            retail_sales, weather_data, transport_issues = results
+            retail_sales = await self.fetch_retail_sales(date)
             
             background_info = []
             
             if isinstance(retail_sales, dict) and "error" not in retail_sales:
                 background_info.append("Retail Sales Data:")
                 background_info.append(str(retail_sales))
-            
-            if isinstance(weather_data, dict) and "error" not in weather_data:
-                background_info.append("\nWeather Conditions:")
-                background_info.append(str(weather_data))
-            
-            if isinstance(transport_issues, dict) and "error" not in transport_issues:
-                background_info.append("\nTransport Status:")
-                background_info.append(str(transport_issues))
 
             result = "\n".join(background_info) if background_info else "No background information available."
             logger.info(f"Successfully gathered background info for {date}")

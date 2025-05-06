@@ -172,14 +172,16 @@ def build_demo() -> gr.Blocks:
                 # Load and preprocess data
                 df = data_loader.load_data()
                 if df is None:
-                    return "Failed to load data"
+                    return "❌ Error: Failed to load data. Please try again later."
                     
                 df = data_loader.preprocess_data(df)
                 if df is None:
-                    return "Failed to preprocess data"
+                    return "❌ Error: Failed to preprocess data. Please try again later."
                 
                 # Filter by date range
                 df = df[(df['date'] >= start_date) & (df['date'] <= end_date)]
+                if df.empty:
+                    return "❌ Error: No data available for the selected date range."
                 
                 # Get top N products with insights
                 products, insights = await analysis_service.get_top_products_with_insights(
@@ -191,6 +193,9 @@ def build_demo() -> gr.Blocks:
                     threshold=threshold,
                     period=period
                 )
+                
+                if not products or not insights:
+                    return "❌ No significant changes found for the selected criteria."
                 
                 # Format results with Markdown
                 result_text = f"# 🔍 Top {n_products} Products with largest sales fluctuations\n\n"
@@ -212,11 +217,16 @@ def build_demo() -> gr.Blocks:
                 
                 return result_text
                 
+            except gr.Error as e:
+                app_logger.error(f"Gradio error: {e}")
+                return f"❌ Error: {str(e)}"
             except Exception as e:
                 app_logger.error(f"Analysis error: {e}")
-                if isinstance(e, gr.Error):
-                    raise e
-                raise gr.Error(f"An error occurred: {str(e)}")
+                return f"❌ An unexpected error occurred: {str(e)}"
+
+        def wrap_async_analyze(*args):
+            """Wrapper function to handle async analyze_with_validation"""
+            return asyncio.run(analyze_with_validation(*args))
 
         top_n.change(
             fn=update_custom_top_n_visibility,
@@ -225,7 +235,7 @@ def build_demo() -> gr.Blocks:
         )
 
         analyze_btn.click(
-            fn=analyze_with_validation,
+            fn=wrap_async_analyze,
             inputs=[
                 start_date,
                 end_date,
