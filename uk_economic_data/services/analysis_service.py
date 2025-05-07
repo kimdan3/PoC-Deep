@@ -11,6 +11,9 @@ from uk_economic_data.services.deepseek_client import DeepSeekClient
 import json
 import time
 from dataclasses import dataclass
+import aiofiles
+import concurrent.futures
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -170,9 +173,40 @@ class AnalysisService:
         self.logger = StructuredLogger()
         self.rate_limiter = APIRateLimiter(max_requests=5, time_window=1)
         self._insights_cache = {}
+        self._cache_file = Path("insights_cache.json")
+        self._load_cache()
+        
+        # Initialize thread pool for CPU-bound operations
+        self._thread_pool = concurrent.futures.ThreadPoolExecutor(max_workers=4)
         
         # Validate API key
         self._validate_api_key()
+
+    def _load_cache(self) -> None:
+        """Load cache from disk"""
+        try:
+            if self._cache_file.exists():
+                with open(self._cache_file, 'r') as f:
+                    cache_data = json.load(f)
+                    self._insights_cache = {
+                        k: (tuple(v[0]), v[1]) 
+                        for k, v in cache_data.items()
+                    }
+                self.logger.info(f"Loaded {len(self._insights_cache)} items from cache")
+        except Exception as e:
+            self.logger.error(f"Failed to load cache: {str(e)}")
+
+    def _save_cache(self) -> None:
+        """Save cache to disk"""
+        try:
+            cache_data = {
+                k: [list(v[0]), v[1]] 
+                for k, v in self._insights_cache.items()
+            }
+            with open(self._cache_file, 'w') as f:
+                json.dump(cache_data, f)
+        except Exception as e:
+            self.logger.error(f"Failed to save cache: {str(e)}")
 
     def _validate_api_key(self) -> None:
         """Validate DeepSeek API key"""
@@ -232,6 +266,8 @@ class AnalysisService:
     def clear_cache(self) -> None:
         """Clear the marketing insights cache"""
         self._insights_cache.clear()
+        if self._cache_file.exists():
+            self._cache_file.unlink()
         self.logger.info("Marketing insights cache cleared")
 
     async def generate_marketing_insights(
@@ -241,22 +277,7 @@ class AnalysisService:
         segment: str, 
         change_rate: float
     ) -> Tuple[str, List[str]]:
-        """
-        Generate marketing insights using DeepSeek API with caching and UK economic context
-        
-        Args:
-            product: Product name
-            date: Analysis date
-            segment: Customer segment
-            change_rate: Sales change rate
-            
-        Returns:
-            Tuple containing cause analysis and strategies
-            
-        Raises:
-            UKDataFetchError: If UK economic data fetch fails
-            APITimeoutError: If API call times out
-        """
+        """Generate marketing insights with improved caching"""
         cache_key = f"{product}_{date}_{segment}"
         if cache_key in self._insights_cache:
             cached_result, timestamp = self._insights_cache[cache_key]
@@ -290,15 +311,12 @@ class AnalysisService:
                 )
                 
                 try:
-                    # Safely extract content
                     content = ""
                     if response.choices and len(response.choices) > 0:
                         choice = response.choices[0]
                         if isinstance(choice, dict):
-                            # Direct content access if no message object
                             content = choice.get("content", "")
                             if not content and "message" in choice:
-                                # If message object exists
                                 message = choice.get("message", {})
                                 if isinstance(message, dict):
                                     content = message.get("content", "")
@@ -309,8 +327,9 @@ class AnalysisService:
                     
                     result = self._parse_insights(content)
                     
-                    # Cache the result
+                    # Cache the result and save to disk
                     self._insights_cache[cache_key] = (result, time.time())
+                    self._save_cache()
                     
                     return result
                     
@@ -430,86 +449,129 @@ class AnalysisService:
             raise ValueError("Minimum age must be less than maximum age")
 
     def _filter_data(self, df: pd.DataFrame, gender: str, min_age: int, max_age: int) -> pd.DataFrame:
-        """Filter DataFrame by gender and age range"""
-        return df[(df['age'] >= min_age) & (df['age'] <= max_age) & (df['gender'] == gender)]
+        """Filter DataFrame by gender and age range using optimized operations"""
+        mask = (df['age'].between(min_age, max_age)) & (df['gender'] == gender)
+        return df.loc[mask]
 
     def _get_top_products(self, df: pd.DataFrame, top_n: int) -> List[str]:
-        """Get top N products by sales fluctuation"""
-        df['fluctuation'] = df.groupby('product_name')['sales_amount'].transform(
-            lambda x: abs(x.max() - x.min())
-        )
-        return df.sort_values('fluctuation', ascending=False).drop_duplicates('product_name').head(top_n)['product_name'].tolist()
+        """Get top N products by sales fluctuation using optimized operations"""
+        # Pre-calculate min and max in a single pass
+        product_stats = df.groupby('product_name').agg({
+            'sales_amount': ['min', 'max']
+        })
+        product_stats.columns = ['min', 'max']
+        product_stats['fluctuation'] = product_stats['max'] - product_stats['min']
+        return product_stats.nlargest(top_n, 'fluctuation').index.tolist()
 
     async def _generate_insights_for_products(
         self,
         df: pd.DataFrame,
         products: List[str]
     ) -> Dict[str, List[str]]:
-        """Generate insights for each product individually"""
+        """Generate insights for products in parallel with improved batching"""
         insights = {}
         failed_products = []
         
-        for product in products:
-            try:
-                product_data = df[df['product_name'] == product].copy()
-                if product_data.empty:
-                    self.logger.warning(f"No data found for product {product}")
-                    failed_products.append(product)
-                    continue
-                    
-                max_sales_date = product_data.loc[product_data['sales_amount'].idxmax(), 'date']
-                max_sales_gender = product_data.loc[product_data['sales_amount'].idxmax(), 'gender']
-                dominant_age_group = self._get_dominant_age_group(df, product)
-                segment = f"{max_sales_gender}, Age group {dominant_age_group}"
-                max_sales = product_data['sales_amount'].max()
-                min_sales = product_data['sales_amount'].min()
-                change_rate = ((min_sales - max_sales) / max_sales) * 100
-                
-                try:
-                    async with asyncio.timeout(self.config.timeout_seconds):
-                        cause_analysis, strategies = await self.generate_marketing_insights(
-                            product,
-                            max_sales_date.strftime('%Y-%m-%d'),
-                            segment,
-                            change_rate
-                        )
-                        
-                        if cause_analysis == "Unable to generate cause analysis." or \
-                           (strategies and strategies[0] == "Unable to generate strategies."):
-                            self.logger.warning(f"Failed to generate insights for product {product}")
-                            failed_products.append(product)
-                            continue
-                            
-                        insight_list = [
-                            f"📊 Analysis period: {max_sales_date.strftime('%Y-%m-%d')}",
-                            f"👥 Target customer: {segment}",
-                            f"📈 Sales change: {change_rate:.1f}%",
-                            "📌 Cause analysis:",
-                            cause_analysis,
-                            "💡 Strategy suggestions:"
-                        ]
-                        insight_list.extend(strategies)
-                        insights[product] = insight_list
-                        
-                except asyncio.TimeoutError:
-                    self.logger.error(f"Timeout generating insights for product {product}")
-                    failed_products.append(product)
-                except Exception as e:
-                    self.logger.error(f"Error generating insights for product {product}: {str(e)}")
-                    failed_products.append(product)
-                    
-            except Exception as e:
-                self.logger.error(f"Error processing product {product}: {str(e)}")
-                failed_products.append(product)
+        # Process products in batches to avoid overwhelming the API
+        batch_size = self.config.batch_size
+        for i in range(0, len(products), batch_size):
+            batch = products[i:i + batch_size]
+            tasks = [
+                asyncio.create_task(self._process_single_product(df, product))
+                for product in batch
+            ]
             
-            # Add delay between API calls to prevent rate limiting
-            await asyncio.sleep(1)
+            # Wait for batch to complete
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            
+            # Process results
+            for product, result in zip(batch, results):
+                if isinstance(result, Exception):
+                    self.logger.error(f"Error processing product {product}: {str(result)}")
+                    failed_products.append(product)
+                elif result:
+                    insights[product] = result
+                else:
+                    failed_products.append(product)
+            
+            # Add small delay between batches to prevent rate limiting
+            if i + batch_size < len(products):
+                await asyncio.sleep(0.5)
         
         # Log failed products
         if failed_products:
             self.logger.warning(f"Failed to generate insights for products: {', '.join(failed_products)}")
         
         return insights
+
+    async def _process_single_product(
+        self,
+        df: pd.DataFrame,
+        product: str
+    ) -> Optional[List[str]]:
+        """Process a single product and generate insights"""
+        try:
+            # Create a copy to avoid SettingWithCopyWarning
+            product_data = df[df['product_name'] == product].copy()
+            if product_data.empty:
+                self.logger.warning(f"No data found for product {product}")
+                return None
+                
+            # Use vectorized operations for calculations
+            max_sales_idx = product_data['sales_amount'].idxmax()
+            max_sales_date = product_data.loc[max_sales_idx, 'date']
+            max_sales_gender = product_data.loc[max_sales_idx, 'gender']
+            
+            # Calculate dominant age group using vectorized operations with observed=True
+            product_data['age_group'] = pd.cut(
+                product_data['age'],
+                bins=range(0, 101, 10),
+                labels=[f"{i}-{i+9}" for i in range(0, 100, 10)],
+                include_lowest=True
+            )
+            dominant_age_group = product_data.groupby('age_group', observed=True)['sales_amount'].sum().idxmax()
+            
+            segment = f"{max_sales_gender}, Age group {dominant_age_group}"
+            max_sales = product_data['sales_amount'].max()
+            min_sales = product_data['sales_amount'].min()
+            change_rate = ((min_sales - max_sales) / max_sales) * 100
+            
+            try:
+                async with asyncio.timeout(self.config.timeout_seconds):
+                    await self.rate_limiter.acquire()
+                    cause_analysis, strategies = await self.generate_marketing_insights(
+                        product,
+                        max_sales_date.strftime('%Y-%m-%d'),
+                        segment,
+                        change_rate
+                    )
+                    
+                    if cause_analysis == "Unable to generate cause analysis." or \
+                       (strategies and strategies[0] == "Unable to generate strategies."):
+                        self.logger.warning(f"Failed to generate insights for product {product}")
+                        return None
+                        
+                    insight_list = [
+                        f"📊 Analysis period: {max_sales_date.strftime('%Y-%m-%d')}",
+                        f"👥 Target customer: {segment}",
+                        f"📈 Sales change: {change_rate:.1f}%",
+                        "📌 Cause analysis:",
+                        cause_analysis,
+                        "💡 Strategy suggestions:"
+                    ]
+                    insight_list.extend(strategies)
+                    return insight_list
+                    
+            except asyncio.TimeoutError:
+                self.logger.error(f"Timeout generating insights for product {product}")
+                return None
+            except Exception as e:
+                self.logger.error(f"Error generating insights for product {product}: {str(e)}")
+                return None
+                
+        except Exception as e:
+            self.logger.error(f"Error processing product {product}: {str(e)}")
+            return None
 
     def _get_age_group(self, age: int) -> str:
         """

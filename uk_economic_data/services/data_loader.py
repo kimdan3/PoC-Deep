@@ -1,8 +1,11 @@
 import pandas as pd
+import os
+import time
 from datetime import datetime
 import logging
-from typing import Optional, List
-import os
+from typing import Optional, List, Dict
+import pyarrow as pa
+import pyarrow.parquet as pq
 
 logger = logging.getLogger(__name__)
 
@@ -19,10 +22,91 @@ class DataLoader:
     MIN_AGE = 0
     MAX_AGE = 100
     
+    # Data type specifications
+    DTYPE_SPEC = {
+        'date': 'datetime64[ns]',
+        'customer_id': 'str',
+        'store_id': 'str',
+        'age': 'int32',
+        'gender': 'str',
+        'age_group': 'str',
+        'product_name': 'str',
+        'category': 'str',
+        'units_sold': 'int32',
+        'unit_price': 'float32',
+        'discount_applied': 'float32',
+        'discounted': 'bool',
+        'sales_amount': 'float32'
+    }
+    
+    @staticmethod
+    def _should_convert_to_parquet(path: str) -> bool:
+        """
+        Check if file should be converted to parquet format.
+        
+        Args:
+            path: Path to the data file
+            
+        Returns:
+            bool: True if file should be converted
+        """
+        try:
+            # Check file size
+            file_size = os.path.getsize(path)
+            if file_size > 10 * 1024 * 1024:  # 10MB
+                return True
+                
+            # Check loading time
+            start_time = time.time()
+            pd.read_csv(path, nrows=1000)  # Sample read
+            load_time = time.time() - start_time
+            if load_time > 1.0:  # 1 second
+                return True
+                
+            return False
+            
+        except Exception as e:
+            logger.error(f"Error checking file conversion: {str(e)}")
+            return False
+            
+    @staticmethod
+    def _convert_to_parquet(csv_path: str) -> str:
+        """
+        Convert CSV file to Parquet format.
+        
+        Args:
+            csv_path: Path to CSV file
+            
+        Returns:
+            str: Path to parquet file
+        """
+        try:
+            parquet_path = csv_path.replace('.csv', '.parquet')
+            
+            # Read CSV with optimized settings
+            df = pd.read_csv(
+                csv_path,
+                dtype=DataLoader.DTYPE_SPEC,
+                parse_dates=['date'],
+                na_values=['NA', 'NULL', 'null', 'NaN', 'nan', ''],
+                encoding='utf-8'
+            )
+            
+            # Convert to parquet
+            table = pa.Table.from_pandas(df)
+            pq.write_table(table, parquet_path)
+            
+            logger.info(f"Successfully converted {csv_path} to {parquet_path}")
+            return parquet_path
+            
+        except Exception as e:
+            logger.error(f"Error converting to parquet: {str(e)}")
+            raise DataLoaderError(f"Error converting to parquet: {str(e)}")
+    
     @staticmethod
     def load_data(path: str = "data/data.csv") -> Optional[pd.DataFrame]:
         """
-        Read CSV and convert 'date' column to datetime.
+        Read data file and optimize for performance.
         
         Args:
             path: Path to the data file
@@ -36,12 +120,32 @@ class DataLoader:
         try:
             if not os.path.exists(path):
                 raise DataLoaderError(f"Data file not found: {path}")
-                
-            df = pd.read_csv(path)
+            
+            # Check if should convert to parquet
+            if path.endswith('.csv') and DataLoader._should_convert_to_parquet(path):
+                path = DataLoader._convert_to_parquet(path)
+            
+            # Load data based on file type
+            if path.endswith('.parquet'):
+                df = pd.read_parquet(path)
+            else:
+                df = pd.read_csv(
+                    path,
+                    dtype={k: v for k, v in DataLoader.DTYPE_SPEC.items() if k != 'date'},
+                    parse_dates=['date'],
+                    na_values=['NA', 'NULL', 'null', 'NaN', 'nan', ''],
+                    encoding='utf-8'
+                )
             
             if df.empty:
                 raise DataLoaderError(f"Data file is empty: {path}")
-                
+            
+            # Create a copy to avoid SettingWithCopyWarning
+            df = df.copy()
+            
+            # Keep only required columns
+            df = df[DataLoader.REQUIRED_COLUMNS]
+            
             logger.info(f"Successfully loaded data from {path}")
             return df
             
