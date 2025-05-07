@@ -138,7 +138,7 @@ class UKEconomicDataFetcher:
             response.raise_for_status()
             data = response.json()
             
-            # 캐시 업데이트
+            # Update cache
             self._cache[cache_key] = data
             self._save_cache()
             
@@ -203,12 +203,12 @@ class UKEconomicDataFetcher:
             if 3 <= date.month <= 4:
                 events.append("Easter period")
             
-            # School holidays (영국 학교 방학 기간)
+            # School holidays (UK school holiday periods)
             uk_school_holidays = {
-                (7, 20): (9, 1),  # 여름 방학
-                (12, 20): (1, 4),  # 크리스마스 방학
-                (4, 1): (4, 15),   # 부활절 방학
-                (10, 25): (11, 2)  # 가을 방학
+                (7, 20): (9, 1),  # Summer holidays
+                (12, 20): (1, 4),  # Christmas holidays
+                (4, 1): (4, 15),   # Easter holidays
+                (10, 25): (11, 2)  # Autumn half-term
             }
             
             for (start_month, start_day), (end_month, end_day) in uk_school_holidays.items():
@@ -218,7 +218,7 @@ class UKEconomicDataFetcher:
                     events.append("School holidays")
                     break
             
-            # Bank holidays (영국 공휴일)
+            # Bank holidays (UK public holidays)
             bank_holidays = [
                 (1, 1),    # New Year's Day
                 (5, 1),    # Early May Bank Holiday
@@ -231,7 +231,7 @@ class UKEconomicDataFetcher:
             if (date.month, date.day) in bank_holidays:
                 events.append("Bank holiday")
             
-            # 계절성
+            # Seasonality
             seasons = {
                 (12, 1): "Winter shopping season",
                 (3, 1): "Spring shopping season",
