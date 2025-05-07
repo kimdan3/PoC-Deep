@@ -44,6 +44,6 @@ Thumbs.db
 
 # Project specific
 *.log
-*.csv
+!data/data.csv
 *.xlsx
 *.xls 

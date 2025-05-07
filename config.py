@@ -13,7 +13,7 @@ UI_CONFIG = {
     "TOP_N": {
         "MIN": 1,
         "MAX": 20,
-        "DEFAULT": 5,
+        "DEFAULT": 3,
         "CHOICES": ["3", "5", "10", "Custom"]
     },
     "AGE": {

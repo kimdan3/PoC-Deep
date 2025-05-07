@@ -70,7 +70,7 @@ def build_demo() -> gr.Blocks:
                 )
                 
                 # Comparison period
-                gr.Markdown("#### 📊 Comparison Period")
+                gr.Markdown("#### 📊 Comparison period")
                 comparison_period = gr.Radio(
                     choices=ANALYSIS_CONFIG["PERIOD_CHOICES"],
                     value=ANALYSIS_CONFIG["DEFAULT_PERIOD"],
@@ -172,56 +172,72 @@ def build_demo() -> gr.Blocks:
                 # Load and preprocess data
                 df = data_loader.load_data()
                 if df is None:
+                    app_logger.error("Failed to load data")
                     return "❌ Error: Failed to load data. Please try again later."
                     
                 df = data_loader.preprocess_data(df)
                 if df is None:
+                    app_logger.error("Failed to preprocess data")
                     return "❌ Error: Failed to preprocess data. Please try again later."
                 
                 # Filter by date range
                 df = df[(df['date'] >= start_date) & (df['date'] <= end_date)]
                 if df.empty:
+                    app_logger.warning(f"No data available for date range: {start_date} to {end_date}")
                     return "❌ Error: No data available for the selected date range."
                 
-                # Get top N products with insights
-                products, insights = await analysis_service.get_top_products_with_insights(
-                    df=df,
-                    gender=gender,
-                    min_age=min_age,
-                    max_age=max_age,
-                    top_n=n_products,
-                    threshold=threshold,
-                    period=period
-                )
-                
-                if not products or not insights:
-                    return "❌ No significant changes found for the selected criteria."
-                
-                # Format results with Markdown
-                result_text = f"# 🔍 Top {n_products} Products with largest sales fluctuations\n\n"
-                result_text += f"### 👥 Target gender: {gender}\n"
-                result_text += f"### 👥 Target age group: {min_age}-{max_age}\n"
-                result_text += f"### 📉 Alert threshold: {threshold}% decrease\n"
-                result_text += f"### 📅 Comparison period: {period}\n\n"
-                
-                for product in products:
-                    result_text += f"## 📦 {product}\n\n"
-                    for insight in insights[product]:
-                        if insight.startswith("📌 Cause analysis:"):
-                            result_text += f"### {insight}\n\n"
-                        elif insight.startswith("💡 Strategy suggestions:"):
-                            result_text += f"### {insight}\n\n"
-                        else:
-                            result_text += f"{insight}\n\n"
-                    result_text += "---\n\n"
-                
-                return result_text
+                try:
+                    # Get top N products with insights
+                    products, insights = await analysis_service.get_top_products_with_insights(
+                        df=df,
+                        gender=gender,
+                        min_age=min_age,
+                        max_age=max_age,
+                        top_n=n_products,
+                        threshold=threshold,
+                        period=period
+                    )
+                    
+                    if not products or not insights:
+                        app_logger.warning("No significant changes found for the selected criteria")
+                        return "❌ No significant changes found for the selected criteria."
+                    
+                    # Format results with Markdown
+                    result_text = f"# 🔍 Top {n_products} Products with largest sales fluctuations\n\n"
+                    result_text += f"### 👥 Target gender: {gender}\n"
+                    result_text += f"### 👥 Target age group: {min_age}-{max_age}\n"
+                    result_text += f"### 📉 Alert threshold: {threshold}% decrease\n"
+                    result_text += f"### 📅 Comparison period: {period}\n\n"
+                    
+                    for product in products:
+                        if product not in insights:
+                            app_logger.warning(f"No insights available for product: {product}")
+                            continue
+                            
+                        result_text += f"## 📦 {product}\n\n"
+                        for insight in insights[product]:
+                            if insight.startswith("📌 Cause analysis:"):
+                                result_text += f"### {insight}\n\n"
+                            elif insight.startswith("💡 Strategy suggestions:"):
+                                result_text += f"### {insight}\n\n"
+                            else:
+                                result_text += f"{insight}\n\n"
+                        result_text += "---\n\n"
+                    
+                    return result_text
+                    
+                except asyncio.TimeoutError:
+                    app_logger.error("Analysis timed out")
+                    return "❌ Error: Analysis timed out. Please try again with a smaller date range or fewer products."
+                except Exception as e:
+                    app_logger.error(f"Analysis error: {str(e)}")
+                    return f"❌ An unexpected error occurred during analysis: {str(e)}"
                 
             except gr.Error as e:
-                app_logger.error(f"Gradio error: {e}")
+                app_logger.error(f"Gradio error: {str(e)}")
                 return f"❌ Error: {str(e)}"
             except Exception as e:
-                app_logger.error(f"Analysis error: {e}")
+                app_logger.error(f"Unexpected error: {str(e)}")
                 return f"❌ An unexpected error occurred: {str(e)}"
 
         def wrap_async_analyze(*args):
@@ -261,7 +277,7 @@ async def main() -> None:
         app_logger.info("Starting application")
         demo = build_demo()
         app_logger.info("Launching Gradio interface")
-        demo.launch(share=True)
+        demo.launch(server_name="127.0.0.1", server_port=7861)
     except Exception as e:
         app_logger.error(f"Application error: {e}")
         raise
