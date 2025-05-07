@@ -64,7 +64,7 @@ CACHE_TTL=3600
 python demo.py
 ```
 
-The application will be available at `http://localhost:7860`.
+The application will be available at `http://localhost:7861`.
 
 ## Key Features
 
