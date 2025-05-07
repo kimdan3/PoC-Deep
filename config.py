@@ -14,7 +14,7 @@ UI_CONFIG = {
         "MIN": 1,
         "MAX": 20,
         "DEFAULT": 5,
-        "CHOICES": ["5", "10", "Custom"]
+        "CHOICES": ["3", "5", "10", "Custom"]
     },
     "AGE": {
         "MIN": 0,
