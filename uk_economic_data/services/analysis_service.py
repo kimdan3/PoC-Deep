@@ -59,22 +59,20 @@ Use the following format:
 
 @dataclass
 class ServiceConfig:
-    """Configuration settings for the AnalysisService"""
-    timeout_seconds: int = 30
-    cache_size: int = 1000
-    batch_size: int = 5
-    api_key: Optional[str] = None
-    cache_ttl: int = 3600  # 1 hour cache TTL
+    """Configuration for the AnalysisService"""
+    api_key: str
+    timeout_seconds: int
+    cache_ttl: int
+    batch_size: int
     
     @classmethod
-    def from_env(cls):
-        """Create configuration from environment variables"""
+    def from_env(cls) -> "ServiceConfig":
+        """Create config from environment variables"""
         return cls(
-            timeout_seconds=int(os.getenv('TIMEOUT_SECONDS', 30)),
-            cache_size=int(os.getenv('CACHE_SIZE', 1000)),
-            batch_size=int(os.getenv('BATCH_SIZE', 5)),
-            api_key=os.getenv('DEEPSEEK_API_KEY'),
-            cache_ttl=int(os.getenv('CACHE_TTL', 3600))
+            api_key=os.getenv("DEEPSEEK_API_KEY", ""),
+            timeout_seconds=int(os.getenv("DEEPSEEK_TIMEOUT_SECONDS", "60")),
+            cache_ttl=int(os.getenv("DEEPSEEK_CACHE_TTL", "3600")),
+            batch_size=int(os.getenv("DEEPSEEK_BATCH_SIZE", "1"))
         )
 
 class APIRateLimiter:
@@ -447,68 +445,62 @@ class AnalysisService:
         df: pd.DataFrame,
         products: List[str]
     ) -> Dict[str, List[str]]:
-        """Generate insights for each product using batch processing"""
+        """Generate insights for each product individually"""
         insights = {}
-        failed_products = set()
+        failed_products = []
         
-        # Split products into batches
-        for i in range(0, len(products), self.config.batch_size):
-            batch = products[i:i + self.config.batch_size]
-            tasks = []
-            
-            for product in batch:
-                try:
-                    product_data = df[df['product_name'] == product].copy()
-                    max_sales_date = product_data.loc[product_data['sales_amount'].idxmax(), 'date']
-                    max_sales_gender = product_data.loc[product_data['sales_amount'].idxmax(), 'gender']
-                    dominant_age_group = self._get_dominant_age_group(df, product)
-                    segment = f"{max_sales_gender}, Age group {dominant_age_group}"
-                    max_sales = product_data['sales_amount'].max()
-                    min_sales = product_data['sales_amount'].min()
-                    change_rate = ((min_sales - max_sales) / max_sales) * 100
+        for product in products:
+            try:
+                product_data = df[df['product_name'] == product].copy()
+                if product_data.empty:
+                    self.logger.warning(f"No data found for product {product}")
+                    failed_products.append(product)
+                    continue
                     
-                    task = self.generate_marketing_insights(
-                        product,
-                        max_sales_date.strftime('%Y-%m-%d'),
-                        segment,
-                        change_rate
-                    )
-                    tasks.append((product, task))
-                except Exception as e:
-                    self.logger.error(f"Error preparing analysis for product {product}: {str(e)}")
-                    failed_products.add(product)
-            
-            if tasks:
-                # Process batch in parallel
+                max_sales_date = product_data.loc[product_data['sales_amount'].idxmax(), 'date']
+                max_sales_gender = product_data.loc[product_data['sales_amount'].idxmax(), 'gender']
+                dominant_age_group = self._get_dominant_age_group(df, product)
+                segment = f"{max_sales_gender}, Age group {dominant_age_group}"
+                max_sales = product_data['sales_amount'].max()
+                min_sales = product_data['sales_amount'].min()
+                change_rate = ((min_sales - max_sales) / max_sales) * 100
+                
                 try:
-                    results = await asyncio.gather(*[task for _, task in tasks], return_exceptions=True)
-                    
-                    # Process results
-                    for (product, _), result in zip(tasks, results):
-                        if isinstance(result, Exception):
-                            self.logger.error(f"Error generating insights for product {product}: {str(result)}")
-                            failed_products.add(product)
-                        else:
-                            cause_analysis, strategies = result
-                            # Check if it's a default failure message
-                            if cause_analysis == "Unable to generate cause analysis." or \
-                               (strategies and strategies[0] == "Unable to generate strategies."):
-                                failed_products.add(product)
-                            else:
-                                insight_list = [
-                                    f"📊 Analysis period: {max_sales_date.strftime('%Y-%m-%d')}",
-                                    f"👥 Target customer: {segment}",
-                                    f"📈 Sales change: {change_rate:.1f}%",
-                                    "📌 Cause analysis:",
-                                    cause_analysis,
-                                    "💡 Strategy suggestions:"
-                                ]
-                                insight_list.extend(strategies)
-                                insights[product] = insight_list
+                    async with asyncio.timeout(self.config.timeout_seconds):
+                        cause_analysis, strategies = await self.generate_marketing_insights(
+                            product,
+                            max_sales_date.strftime('%Y-%m-%d'),
+                            segment,
+                            change_rate
+                        )
+                        
+                        if cause_analysis == "Unable to generate cause analysis." or \
+                           (strategies and strategies[0] == "Unable to generate strategies."):
+                            self.logger.warning(f"Failed to generate insights for product {product}")
+                            failed_products.append(product)
+                            continue
+                            
+                        insight_list = [
+                            f"📊 Analysis period: {max_sales_date.strftime('%Y-%m-%d')}",
+                            f"👥 Target customer: {segment}",
+                            f"📈 Sales change: {change_rate:.1f}%",
+                            "📌 Cause analysis:",
+                            cause_analysis,
+                            "💡 Strategy suggestions:"
+                        ]
+                        insight_list.extend(strategies)
+                        insights[product] = insight_list
+                        
+                except asyncio.TimeoutError:
+                    self.logger.error(f"Timeout generating insights for product {product}")
+                    failed_products.append(product)
                 except Exception as e:
-                    self.logger.error(f"Error processing batch: {str(e)}")
-                    for product, _ in tasks:
-                        failed_products.add(product)
+                    self.logger.error(f"Error generating insights for product {product}: {str(e)}")
+                    failed_products.append(product)
+                    
+            except Exception as e:
+                self.logger.error(f"Error processing product {product}: {str(e)}")
+                failed_products.append(product)
             
             # Add delay between API calls to prevent rate limiting
             await asyncio.sleep(1)
